@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Email Sender Tool</title>
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+        background: #f5f7fa;
+        min-height: 100vh;
+        color: #1f2937;
+      }
+      .app-container { display: flex; min-height: 100vh; }
+      .sidebar {
+        width: 280px;
+        background: linear-gradient(180deg, #667eea 0%, #764ba2 100%);
+        color: #fff;
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        overflow-y: auto;
+        box-shadow: 4px 0 10px rgba(0, 0, 0, 0.12);
+      }
+      .sidebar-header { padding: 28px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.2); text-align: center; }
+      .sidebar-header h1 { font-size: 1.45rem; margin-bottom: 6px; }
+      .sidebar-header p { opacity: 0.88; font-size: 0.95rem; }
+      .sidebar-menu { padding: 14px; }
+      .menu-item {
+        padding: 14px 16px;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.15);
+        border: 1px solid rgba(255, 255, 255, 0.3);
+        font-weight: 600;
+      }
+      .main-content { margin-left: 280px; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
+      .header {
+        background: #fff;
+        padding: 24px 34px;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.06);
+        position: sticky;
+        top: 0;
+        z-index: 10;
+      }
+      .header h2 { font-size: 1.65rem; margin-bottom: 5px; color: #1f2937; }
+      .header p { color: #64748b; font-size: 0.98rem; }
+      .content { padding: 28px 34px; max-width: 1450px; width: 100%; }
+      .section {
+        margin: 22px 0;
+        padding: 22px;
+        border: 1px solid #e2e8f0;
+        border-radius: 12px;
+        background: #fff;
+        box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+      }
+      .section h3 {
+        color: #1f2937;
+        margin-bottom: 16px;
+        font-size: 1.2rem;
+        border-bottom: 2px solid #667eea;
+        padding-bottom: 10px;
+      }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+      .form-group { margin: 10px 0; }
+      label { display: block; margin-bottom: 8px; font-weight: 600; color: #475569; }
+      input[type="file"] {
+        width: 100%;
+        padding: 10px;
+        border: 2px solid #d1d5db;
+        border-radius: 8px;
+        font-size: 15px;
+        background: #fff;
+      }
+      input[type="file"]:focus { outline: none; border-color: #667eea; }
+      button {
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        color: #fff;
+        padding: 10px 16px;
+        border: none;
+        border-radius: 8px;
+        cursor: pointer;
+        font-size: 14px;
+        font-weight: 700;
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+      }
+      button:hover:not([disabled]) { transform: translateY(-2px); box-shadow: 0 4px 14px rgba(102, 126, 234, 0.35); }
+      button[disabled] { opacity: 0.55; cursor: not-allowed; }
+      .btn-secondary { background: linear-gradient(135deg, #0ea5e9 0%, #0284c7 100%); }
+      .btn-outline { background: #fff; color: #334155; border: 2px solid #cbd5e1; }
+      .btn-danger { background: linear-gradient(135deg, #ff6b6b, #ee5a52); }
+      .flash { padding: 12px 14px; border-radius: 9px; margin-bottom: 10px; font-weight: 600; }
+      .flash.success { background: #dcfce7; border: 1px solid #86efac; color: #166534; }
+      .flash.error { background: #fee2e2; border: 1px solid #fca5a5; color: #991b1b; }
+      .summary-strip { background: #f8fafc; padding: 12px; border-radius: 8px; border-left: 4px solid #667eea; margin-bottom: 12px; color: #334155; }
+      table { width: 100%; border-collapse: collapse; min-width: 980px; }
+      th, td { border-bottom: 1px solid #e5e7eb; text-align: left; padding: 10px; vertical-align: top; }
+      th { background: #f8fafc; position: sticky; top: 0; z-index: 1; }
+      .table-wrap { overflow: auto; border: 1px solid #e2e8f0; border-radius: 10px; }
+      .status { font-weight: 800; text-transform: uppercase; font-size: 11px; letter-spacing: 0.4px; }
+      .status.pending { color: #0369a1; }
+      .status.sent { color: #15803d; }
+      .status.failed { color: #b91c1c; }
+      .status.skipped { color: #9a3412; }
+      .small { font-size: 12px; color: #64748b; }
+      .footer { background: #fff; border-top: 1px solid #e2e8f0; color: #64748b; text-align: center; padding: 15px; margin-top: auto; }
+      .modal-backdrop {
+        display: none;
+        position: fixed;
+        inset: 0;
+        background: rgba(0, 0, 0, 0.72);
+        backdrop-filter: blur(4px);
+        align-items: center;
+        justify-content: center;
+        padding: 20px;
+        z-index: 9999;
+      }
+      .modal {
+        width: min(100%, 1120px);
+        max-height: 90vh;
+        overflow: auto;
+        background: #fff;
+        border-radius: 14px;
+        border: 1px solid #cbd5e1;
+        padding: 16px;
+      }
+      .modal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+      .modal-table-wrapper { overflow: auto; border: 1px solid #e5e7eb; border-radius: 8px; }
+      @media (max-width: 968px) {
+        .sidebar { display: none; }
+        .main-content { margin-left: 0; }
+        .header, .content { padding: 18px; }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="app-container">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <h1>📧 Email Sender</h1>
+          <p>Automation Suite</p>
+        </div>
+        <nav class="sidebar-menu">
+          <div class="menu-item">BV Report Mailer</div>
+        </nav>
+      </aside>
+
+      <main class="main-content">
+        <header class="header">
+          <h2>Email Dispatch Console</h2>
+          <p>Upload both files, review office slices, and send all or one-by-one.</p>
+        </header>
+
+        <section class="content">
+          <div class="section" style="border: 2px solid #667eea; background: #f8f9ff;">
+            <h3>Step 1: Upload Input Files</h3>
+
+            {% with messages = get_flashed_messages(with_categories=true) %}
+              {% if messages %}
+                {% for category, message in messages %}
+                  <div class="flash {{ category }}">{{ message }}</div>
+                {% endfor %}
+              {% endif %}
+            {% endwith %}
+
+            <form action="{{ url_for('upload_files') }}" method="post" enctype="multipart/form-data" id="uploadForm">
+              <div class="row">
+                <div class="form-group" style="flex: 1; min-width: 260px;">
+                  <label>Email file</label>
+                  <input type="file" name="email_file" id="emailFile" accept=".xlsx,.xls" required />
+                </div>
+                <div class="form-group" style="flex: 1; min-width: 260px;">
+                  <label>Consolidated data file</label>
+                  <input type="file" name="data_file" id="dataFile" accept=".xlsx,.xls" required />
+                </div>
+                <div style="align-self: end;">
+                  <button class="btn-primary" type="submit" id="uploadBtn" disabled>📤 Upload</button>
+                </div>
+              </div>
+            </form>
+          </div>
+
+          <div class="section">
+            <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
+              <h3 style="margin: 0; border: 0; padding: 0;">Step 2: Review & Send</h3>
+              <div class="row">
+                <form action="{{ url_for('send_all') }}" method="post">
+                  <button class="btn-danger" type="submit" {% if not uploaded %}disabled{% endif %}>🚀 Send All</button>
+                </form>
+                <form action="{{ url_for('reset_app') }}" method="post">
+                  <button class="btn-outline" type="submit">🗑️ Reset</button>
+                </form>
+              </div>
+            </div>
+
+            <div class="summary-strip small">
+              rows={{ summary.get('rows', 0) }}, sent={{ summary.get('sent', 0) }}, failed={{ summary.get('failed', 0) }},
+              skipped_no_doctor={{ summary.get('skipped_no_doctor', 0) }},
+              skipped_no_to={{ summary.get('skipped_no_to', 0) }},
+              skipped_no_data={{ summary.get('skipped_no_data', 0) }}
+            </div>
+
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Office Name</th>
+                    <th>To</th>
+                    <th>CC</th>
+                    <th>Rows</th>
+                    <th>Status</th>
+                    <th>Message</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% if records %}
+                    {% for r in records %}
+                      <tr>
+                        <td>{{ r.office_name }}</td>
+                        <td>{{ ", ".join(r.to) }}</td>
+                        <td>{{ ", ".join(r.cc) }}</td>
+                        <td>{{ r.row_count }}</td>
+                        <td><span class="status {{ r.status }}">{{ r.status }}</span></td>
+                        <td>{{ r.message }}</td>
+                        <td>
+                          <div class="row">
+                            <button class="btn-outline view-btn" type="button" data-id="{{ r.id }}" {% if not r.slice_rows %}disabled{% endif %}>View</button>
+                            <form action="{{ url_for('send_one', record_id=r.id) }}" method="post">
+                              <button class="btn-secondary" type="submit" {% if not r.can_send %}disabled{% endif %}>Send</button>
+                            </form>
+                          </div>
+                        </td>
+                      </tr>
+                    {% endfor %}
+                  {% else %}
+                    <tr><td colspan="7" class="small">No records yet. Upload both files.</td></tr>
+                  {% endif %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
+        <footer class="footer">
+          <p>Email Sender Tool</p>
+        </footer>
+      </main>
+    </div>
+
+    <div class="modal-backdrop" id="modalBackdrop">
+      <div class="modal">
+        <div class="modal-header">
+          <h3 id="modalTitle">Slice Preview</h3>
+          <button class="btn-outline" id="modalClose" type="button">Close</button>
+        </div>
+        <div class="modal-table-wrapper">
+          <table id="modalTable"></table>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      const emailFile = document.getElementById("emailFile");
+      const dataFile = document.getElementById("dataFile");
+      const uploadBtn = document.getElementById("uploadBtn");
+
+      function updateUploadButtonState() {
+        uploadBtn.disabled = !(emailFile.files.length > 0 && dataFile.files.length > 0);
+      }
+      emailFile.addEventListener("change", updateUploadButtonState);
+      dataFile.addEventListener("change", updateUploadButtonState);
+
+      const modalBackdrop = document.getElementById("modalBackdrop");
+      const modalClose = document.getElementById("modalClose");
+      const modalTitle = document.getElementById("modalTitle");
+      const modalTable = document.getElementById("modalTable");
+
+      function closeModal() {
+        modalBackdrop.style.display = "none";
+        modalTable.innerHTML = "";
+      }
+      modalClose.addEventListener("click", closeModal);
+      modalBackdrop.addEventListener("click", (event) => {
+        if (event.target === modalBackdrop) closeModal();
+      });
+
+      async function openPreview(recordId) {
+        const response = await fetch(`/preview/${recordId}`);
+        const payload = await response.json();
+        if (!payload.ok) {
+          alert(payload.error || "Unable to load preview");
+          return;
+        }
+
+        modalTitle.textContent = `Slice Preview - ${payload.office_name}`;
+        const columns = payload.columns || [];
+        const rows = payload.rows || [];
+
+        let html = "<thead><tr>";
+        for (const c of columns) html += `<th>${c}</th>`;
+        html += "</tr></thead><tbody>";
+
+        for (const row of rows) {
+          html += "<tr>";
+          for (const c of columns) {
+            const value = row[c] == null ? "" : String(row[c]);
+            html += `<td>${value}</td>`;
+          }
+          html += "</tr>";
+        }
+        html += "</tbody>";
+        modalTable.innerHTML = html;
+        modalBackdrop.style.display = "flex";
+      }
+
+      document.querySelectorAll(".view-btn").forEach((btn) => {
+        btn.addEventListener("click", () => openPreview(btn.dataset.id));
+      });
+    </script>
+  </body>
+</html>
