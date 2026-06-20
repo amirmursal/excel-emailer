@@ -4,6 +4,8 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import shutil
+from datetime import datetime
 from io import BytesIO
 from email.message import EmailMessage
 from email.utils import parseaddr
@@ -18,22 +20,58 @@ except ImportError:
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "email-sender-dev-secret")
+MISC_TO_RECIPIENTS = ["mmemon@orthosynetics.com"] # later change to mmemon@orthosynetics.com
+MISC_CC_RECIPIENTS = ["rafiks77@gmail.com"] # later change to rafiks77@gmail.com
 
-STATE = {
-    "records": [],
-    "summary": {},
-    "uploaded": False,
+WORKFLOWS = [
+    ("bv-ortho-no-info", "BV – Ortho No Info Emailer"),
+    ("bv-dental-no-info", "BV – Dental No Info Emailer"),
+    ("ev-ortho-rstc", "EV – Ortho RSTC Emailer"),
+    ("ev-dental-rstc", "EV – Dental RSTC Emailer"),
+    ("bv-ortho-rstc", "BV – Ortho RSTC Emailer"),
+    ("bv-dental-rstc", "BV – Dental RSTC Emailer"),
+]
+WORKFLOW_MAP = dict(WORKFLOWS)
+DEFAULT_WORKFLOW = WORKFLOWS[0][0]
+STATE_BY_WORKFLOW = {
+    workflow_id: {
+        "records": [],
+        "summary": {},
+        "uploaded": False,
+    }
+    for workflow_id, _ in WORKFLOWS
 }
 
 
-def reset_state():
-    STATE["records"] = []
-    STATE["summary"] = {}
-    STATE["uploaded"] = False
+def get_workflow_or_default(workflow_id):
+    if workflow_id in WORKFLOW_MAP:
+        return workflow_id
+    return DEFAULT_WORKFLOW
+
+
+def reset_state(workflow_id):
+    state = STATE_BY_WORKFLOW[workflow_id]
+    state["records"] = []
+    state["summary"] = {}
+    state["uploaded"] = False
 
 
 def safe_file_name(name):
     return "".join(c for c in name if c.isalnum() or c in (" ", "-", "_")).strip()
+
+
+def normalize_column_name(name):
+    return "".join(ch for ch in str(name).strip().lower() if ch.isalnum())
+
+
+def find_column(df, expected_name):
+    expected_normalized = normalize_column_name(expected_name)
+    for column in df.columns:
+        if normalize_column_name(column) == expected_normalized:
+            return column
+    raise ValueError(
+        f"Required column '{expected_name}' not found. Available columns: {', '.join(map(str, df.columns))}"
+    )
 
 
 def clean_recipients(raw_value):
@@ -146,6 +184,26 @@ def to_excel_bytes(rows):
     return output.getvalue()
 
 
+def sanitize_for_json(value):
+    if pd.isna(value):
+        return ""
+    if isinstance(value, pd.Timestamp):
+        return value.isoformat()
+    return value
+
+
+def sanitize_rows_for_json(rows):
+    return [{key: sanitize_for_json(value) for key, value in row.items()} for row in rows]
+
+
+def create_named_attachment_tempfile(attachment_name, attachment_bytes):
+    temp_dir = tempfile.mkdtemp(prefix="excel-emailer-")
+    temp_path = os.path.join(temp_dir, attachment_name)
+    with open(temp_path, "wb") as temp_file:
+        temp_file.write(attachment_bytes)
+    return temp_path, temp_dir
+
+
 def send_email(record, use_outlook_windows, use_outlook_mac, outlook, smtp_server, smtp_from):
     subject = f"BV Report - {record['office_name']}"
     body = f"""Hi,
@@ -156,12 +214,12 @@ Regards,
 Mushtaq Memon
 """
     attachment_bytes = to_excel_bytes(record["slice_rows"])
-    attachment_name = f"{record['safe_name']}.xlsx"
+    office_name_for_file = safe_file_name(record["office_name"]) or record.get("safe_name") or "Report"
+    us_date_for_file = datetime.now().strftime("%m-%d-%Y")
+    attachment_name = f"{office_name_for_file} {us_date_for_file}.xlsx"
 
     if use_outlook_windows and outlook is not None:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            tmp.write(attachment_bytes)
-            temp_path = tmp.name
+        temp_path, temp_dir = create_named_attachment_tempfile(attachment_name, attachment_bytes)
         try:
             mail = outlook.CreateItem(0)
             mail.To = "; ".join(record["to"])
@@ -172,18 +230,16 @@ Mushtaq Memon
             mail.Send()
         finally:
             try:
-                os.remove(temp_path)
+                shutil.rmtree(temp_dir, ignore_errors=True)
             except OSError:
                 pass
     elif use_outlook_mac:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".xlsx") as tmp:
-            tmp.write(attachment_bytes)
-            temp_path = tmp.name
+        temp_path, temp_dir = create_named_attachment_tempfile(attachment_name, attachment_bytes)
         try:
             send_via_outlook_mac(record["to"], record["cc"], subject, body, temp_path)
         finally:
             try:
-                os.remove(temp_path)
+                shutil.rmtree(temp_dir, ignore_errors=True)
             except OSError:
                 pass
     else:
@@ -204,10 +260,45 @@ Mushtaq Memon
 
 
 def build_records(email_bytes, data_bytes):
-    email_df = pd.read_excel(BytesIO(email_bytes))
-    data_df = pd.read_excel(BytesIO(data_bytes), sheet_name="All Agent Data")
-    data_df.columns = data_df.columns.str.strip()
-    email_df.columns = email_df.columns.str.strip()
+    # Always use first sheet, and auto-detect if files were uploaded in swapped order.
+    first_df = pd.read_excel(BytesIO(email_bytes), sheet_name=0)
+    second_df = pd.read_excel(BytesIO(data_bytes), sheet_name=0)
+    first_df.columns = first_df.columns.str.strip()
+    second_df.columns = second_df.columns.str.strip()
+
+    def has_required_columns(df, required_names):
+        try:
+            for name in required_names:
+                find_column(df, name)
+            return True
+        except ValueError:
+            return False
+
+    email_required = ["Doctor Name", "BV Report Send To", "BV Report Send CC"]
+    data_required = ["Office Name"]
+    first_is_email = has_required_columns(first_df, email_required)
+    second_is_data = has_required_columns(second_df, data_required)
+    second_is_email = has_required_columns(second_df, email_required)
+    first_is_data = has_required_columns(first_df, data_required)
+
+    if first_is_email and second_is_data:
+        email_df, data_df = first_df, second_df
+    elif second_is_email and first_is_data:
+        email_df, data_df = second_df, first_df
+    else:
+        raise ValueError(
+            "Could not identify Email and Data files. "
+            "Email file must contain Doctor Name, BV Report Send To, BV Report Send CC; "
+            "Data file must contain Office Name."
+        )
+
+    doctor_col = find_column(email_df, "Doctor Name")
+    to_col = find_column(email_df, "BV Report Send To")
+    cc_col = find_column(email_df, "BV Report Send CC")
+    office_col = find_column(data_df, "Office Name")
+    office_names = data_df[office_col].fillna("").astype(str).str.strip()
+    doctor_names = email_df[doctor_col].fillna("").astype(str).str.strip()
+    doctor_name_set = {name for name in doctor_names if name and name.lower() != "nan"}
 
     records = []
     skipped_no_doctor = 0
@@ -215,9 +306,9 @@ def build_records(email_bytes, data_bytes):
     skipped_no_data = 0
 
     for _, row in email_df.iterrows():
-        doctor = str(row["Doctor Name"]).strip()
-        to_email_list = clean_recipients(row["BV Report Send To"])
-        cc_email_list = clean_recipients(row["BV Report Send CC"])
+        doctor = str(row[doctor_col]).strip()
+        to_email_list = clean_recipients(row[to_col])
+        cc_email_list = clean_recipients(row[cc_col])
         record = {
             "id": str(uuid.uuid4()),
             "office_name": doctor,
@@ -233,25 +324,15 @@ def build_records(email_bytes, data_bytes):
 
         if not doctor or doctor.lower() == "nan":
             skipped_no_doctor += 1
-            record["office_name"] = "(blank)"
-            record["status"] = "skipped"
-            record["message"] = "No doctor name"
-            records.append(record)
             continue
 
         if not to_email_list:
             skipped_no_to += 1
-            record["status"] = "skipped"
-            record["message"] = "No valid To email"
-            records.append(record)
             continue
 
-        filtered_df = data_df[data_df["Office Name"].str.strip() == doctor]
+        filtered_df = data_df[office_names == doctor]
         if filtered_df.empty:
             skipped_no_data += 1
-            record["status"] = "skipped"
-            record["message"] = "No matching data in Office Name"
-            records.append(record)
             continue
 
         clean_name = safe_file_name(doctor.replace(".", "").replace("&", "and")) or "Report"
@@ -260,6 +341,24 @@ def build_records(email_bytes, data_bytes):
         record["row_count"] = len(filtered_df)
         record["slice_rows"] = filtered_df.fillna("").to_dict(orient="records")
         records.append(record)
+
+    unmatched_data_df = data_df[(~office_names.isin(doctor_name_set)) & (office_names != "")]
+    unmatched_rows = unmatched_data_df.fillna("").to_dict(orient="records")
+    if unmatched_rows:
+        records.append(
+            {
+                "id": str(uuid.uuid4()),
+                "office_name": "Miscellaneous (Non Matching)",
+                "safe_name": "Misc-Non-Matching-Report",
+                "to": MISC_TO_RECIPIENTS.copy(),
+                "cc": MISC_CC_RECIPIENTS.copy(),
+                "status": "pending",
+                "message": "All non-matching records grouped here.",
+                "row_count": len(unmatched_rows),
+                "slice_rows": unmatched_rows,
+                "can_send": True,
+            }
+        )
 
     summary = {
         "rows": len(email_df),
@@ -272,7 +371,8 @@ def build_records(email_bytes, data_bytes):
     return records, summary
 
 
-def send_records(record_ids=None):
+def send_records(workflow_id, record_ids=None):
+    state = STATE_BY_WORKFLOW[workflow_id]
     use_outlook_windows = os.name == "nt" and win32 is not None
     use_outlook_mac = sys.platform == "darwin"
 
@@ -286,7 +386,7 @@ def send_records(record_ids=None):
     try:
         sent_count = 0
         failed_count = 0
-        for record in STATE["records"]:
+        for record in state["records"]:
             if record_ids and record["id"] not in record_ids:
                 continue
 
@@ -307,9 +407,9 @@ def send_records(record_ids=None):
                 failed_count += 1
                 print(f"[FAIL] {record['office_name']}: {e}")
 
-        STATE["summary"]["sent"] += sent_count
-        STATE["summary"]["failed"] += failed_count
-        return STATE["summary"]
+        state["summary"]["sent"] += sent_count
+        state["summary"]["failed"] += failed_count
+        return state["summary"]
     finally:
         if smtp_server is not None:
             smtp_server.quit()
@@ -317,16 +417,23 @@ def send_records(record_ids=None):
 
 @app.get("/")
 def home():
+    workflow_id = get_workflow_or_default(request.args.get("workflow", DEFAULT_WORKFLOW))
+    state = STATE_BY_WORKFLOW[workflow_id]
     return render_template(
         "index.html",
-        records=STATE["records"],
-        summary=STATE["summary"],
-        uploaded=STATE["uploaded"],
+        records=state["records"],
+        summary=state["summary"],
+        uploaded=state["uploaded"],
+        workflows=WORKFLOWS,
+        current_workflow=workflow_id,
+        current_workflow_label=WORKFLOW_MAP[workflow_id],
     )
 
 
-@app.post("/upload")
-def upload_files():
+@app.post("/upload/<workflow_id>")
+def upload_files(workflow_id):
+    workflow_id = get_workflow_or_default(workflow_id)
+    state = STATE_BY_WORKFLOW[workflow_id]
     try:
         email_upload = request.files.get("email_file")
         data_upload = request.files.get("data_file")
@@ -337,71 +444,78 @@ def upload_files():
         email_bytes = email_upload.read()
         data_bytes = data_upload.read()
         records, summary = build_records(email_bytes, data_bytes)
-        STATE["records"] = records
-        STATE["summary"] = summary
-        STATE["uploaded"] = True
+        state["records"] = records
+        state["summary"] = summary
+        state["uploaded"] = True
 
         flash("Files uploaded and sliced reports generated.", "success")
-        return redirect(url_for("home"))
+        return redirect(url_for("home", workflow=workflow_id))
     except Exception as e:
         flash(f"Upload failed: {e}", "error")
-        return redirect(url_for("home"))
+        return redirect(url_for("home", workflow=workflow_id))
 
 
-@app.post("/send-all")
-def send_all():
-    if not STATE["uploaded"]:
+@app.post("/send-all/<workflow_id>")
+def send_all(workflow_id):
+    workflow_id = get_workflow_or_default(workflow_id)
+    state = STATE_BY_WORKFLOW[workflow_id]
+    if not state["uploaded"]:
         flash("Upload both files first.", "error")
-        return redirect(url_for("home"))
+        return redirect(url_for("home", workflow=workflow_id))
     try:
-        send_records()
+        send_records(workflow_id)
         flash("Send All completed.", "success")
     except Exception as e:
         flash(f"Send All failed: {e}", "error")
-    return redirect(url_for("home"))
+    return redirect(url_for("home", workflow=workflow_id))
 
 
-@app.post("/reset")
-def reset_app():
+@app.post("/reset/<workflow_id>")
+def reset_app(workflow_id):
+    workflow_id = get_workflow_or_default(workflow_id)
     try:
-        reset_state()
+        reset_state(workflow_id)
         flash("App reset completed.", "success")
     except Exception as e:
         flash(f"Reset failed: {e}", "error")
-    return redirect(url_for("home"))
+    return redirect(url_for("home", workflow=workflow_id))
 
 
-@app.post("/send/<record_id>")
-def send_one(record_id):
-    if not STATE["uploaded"]:
+@app.post("/send/<workflow_id>/<record_id>")
+def send_one(workflow_id, record_id):
+    workflow_id = get_workflow_or_default(workflow_id)
+    state = STATE_BY_WORKFLOW[workflow_id]
+    if not state["uploaded"]:
         flash("Upload both files first.", "error")
-        return redirect(url_for("home"))
+        return redirect(url_for("home", workflow=workflow_id))
 
-    record = next((r for r in STATE["records"] if r["id"] == record_id), None)
+    record = next((r for r in state["records"] if r["id"] == record_id), None)
     if not record:
         flash("Record not found.", "error")
-        return redirect(url_for("home"))
+        return redirect(url_for("home", workflow=workflow_id))
     if not record["can_send"]:
         flash("This record cannot be sent.", "error")
-        return redirect(url_for("home"))
+        return redirect(url_for("home", workflow=workflow_id))
 
     try:
-        send_records(record_ids={record_id})
+        send_records(workflow_id, record_ids={record_id})
         flash(f"Sent: {record['office_name']}", "success")
     except Exception as e:
         flash(f"Failed to send {record['office_name']}: {e}", "error")
-    return redirect(url_for("home"))
+    return redirect(url_for("home", workflow=workflow_id))
 
 
-@app.get("/preview/<record_id>")
-def preview_slice(record_id):
-    record = next((r for r in STATE["records"] if r["id"] == record_id), None)
+@app.get("/preview/<workflow_id>/<record_id>")
+def preview_slice(workflow_id, record_id):
+    workflow_id = get_workflow_or_default(workflow_id)
+    state = STATE_BY_WORKFLOW[workflow_id]
+    record = next((r for r in state["records"] if r["id"] == record_id), None)
     if not record or not record.get("slice_rows"):
         return jsonify({"ok": False, "error": "Sliced file not found."}), 404
 
     try:
         df = pd.DataFrame(record["slice_rows"])
-        rows = df.head(200).fillna("").to_dict(orient="records")
+        rows = sanitize_rows_for_json(df.head(200).to_dict(orient="records"))
         return jsonify(
             {
                 "ok": True,

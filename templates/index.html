@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Email Sender Tool</title>
+    <title>Excel Emailer</title>
     <style>
       * { margin: 0; padding: 0; box-sizing: border-box; }
       body {
@@ -27,13 +27,31 @@
       .sidebar-header { padding: 28px 20px; border-bottom: 1px solid rgba(255, 255, 255, 0.2); text-align: center; }
       .sidebar-header h1 { font-size: 1.45rem; margin-bottom: 6px; }
       .sidebar-header p { opacity: 0.88; font-size: 0.95rem; }
-      .sidebar-menu { padding: 14px; }
+      .sidebar-menu {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+      }
+      .sidebar-menu li { margin: 5px 0; }
       .menu-item {
-        padding: 14px 16px;
-        border-radius: 10px;
-        background: rgba(255, 255, 255, 0.15);
-        border: 1px solid rgba(255, 255, 255, 0.3);
+        display: block;
+        width: 100%;
+        padding: 15px 20px;
+        color: #fff;
+        text-decoration: none;
+        cursor: pointer;
+        transition: all 0.3s;
+        border-left: 3px solid transparent;
         font-weight: 600;
+      }
+      .menu-item:hover {
+        background: rgba(255, 255, 255, 0.1);
+        border-left-color: #fff;
+      }
+      .menu-item.active {
+        background: rgba(255, 255, 255, 0.2);
+        border-left-color: #fff;
+        font-weight: 700;
       }
       .main-content { margin-left: 280px; flex: 1; display: flex; flex-direction: column; min-height: 100vh; }
       .header {
@@ -138,17 +156,26 @@
     <div class="app-container">
       <aside class="sidebar">
         <div class="sidebar-header">
-          <h1>📧 Email Sender</h1>
+          <h1>📧 Excel Emailer</h1>
           <p>Automation Suite</p>
         </div>
-        <nav class="sidebar-menu">
-          <div class="menu-item">BV Report Mailer</div>
-        </nav>
+        <ul class="sidebar-menu">
+          {% for workflow_id, workflow_label in workflows %}
+            <li>
+              <a
+                class="menu-item {% if workflow_id == current_workflow %}active{% endif %}"
+                href="{{ url_for('home', workflow=workflow_id) }}"
+              >
+                {{ workflow_label }}
+              </a>
+            </li>
+          {% endfor %}
+        </ul>
       </aside>
 
       <main class="main-content">
         <header class="header">
-          <h2>Email Dispatch Console</h2>
+          <h2>{{ current_workflow_label }}</h2>
           <p>Upload both files, review office slices, and send all or one-by-one.</p>
         </header>
 
@@ -164,14 +191,14 @@
               {% endif %}
             {% endwith %}
 
-            <form action="{{ url_for('upload_files') }}" method="post" enctype="multipart/form-data" id="uploadForm">
+            <form action="{{ url_for('upload_files', workflow_id=current_workflow) }}" method="post" enctype="multipart/form-data" id="uploadForm">
               <div class="row">
                 <div class="form-group" style="flex: 1; min-width: 260px;">
                   <label>Email file</label>
                   <input type="file" name="email_file" id="emailFile" accept=".xlsx,.xls" required />
                 </div>
                 <div class="form-group" style="flex: 1; min-width: 260px;">
-                  <label>Consolidated data file</label>
+                  <label>Data file</label>
                   <input type="file" name="data_file" id="dataFile" accept=".xlsx,.xls" required />
                 </div>
                 <div style="align-self: end;">
@@ -185,10 +212,10 @@
             <div class="row" style="justify-content: space-between; margin-bottom: 12px;">
               <h3 style="margin: 0; border: 0; padding: 0;">Step 2: Review & Send</h3>
               <div class="row">
-                <form action="{{ url_for('send_all') }}" method="post">
+                <form action="{{ url_for('send_all', workflow_id=current_workflow) }}" method="post">
                   <button class="btn-danger" type="submit" {% if not uploaded %}disabled{% endif %}>🚀 Send All</button>
                 </form>
-                <form action="{{ url_for('reset_app') }}" method="post">
+                <form action="{{ url_for('reset_app', workflow_id=current_workflow) }}" method="post">
                   <button class="btn-outline" type="submit">🗑️ Reset</button>
                 </form>
               </div>
@@ -227,7 +254,7 @@
                         <td>
                           <div class="row">
                             <button class="btn-outline view-btn" type="button" data-id="{{ r.id }}" {% if not r.slice_rows %}disabled{% endif %}>View</button>
-                            <form action="{{ url_for('send_one', record_id=r.id) }}" method="post">
+                            <form action="{{ url_for('send_one', workflow_id=current_workflow, record_id=r.id) }}" method="post">
                               <button class="btn-secondary" type="submit" {% if not r.can_send %}disabled{% endif %}>Send</button>
                             </form>
                           </div>
@@ -287,7 +314,7 @@
       });
 
       async function openPreview(recordId) {
-        const response = await fetch(`/preview/${recordId}`);
+        const response = await fetch(`/preview/{{ current_workflow }}/${recordId}`);
         const payload = await response.json();
         if (!payload.ok) {
           alert(payload.error || "Unable to load preview");
