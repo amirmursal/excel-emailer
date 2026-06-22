@@ -324,19 +324,21 @@
         modalTitle.textContent = `Slice Preview - ${payload.office_name}`;
         const columns = payload.columns || [];
         const rows = payload.rows || [];
+        const highlightFlags = payload.highlight_flags || [];
 
         let html = "<thead><tr>";
         for (const c of columns) html += `<th>${c}</th>`;
         html += "</tr></thead><tbody>";
 
-        for (const row of rows) {
-          html += "<tr>";
+        rows.forEach((row, rowIndex) => {
+          const rowStyle = highlightFlags[rowIndex] ? ' style="background:#fff59d;"' : "";
+          html += `<tr${rowStyle}>`;
           for (const c of columns) {
             const value = row[c] == null ? "" : String(row[c]);
             html += `<td>${value}</td>`;
           }
           html += "</tr>";
-        }
+        });
         html += "</tbody>";
         modalTable.innerHTML = html;
         modalBackdrop.style.display = "flex";

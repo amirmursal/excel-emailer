@@ -14,11 +14,17 @@ from email.utils import parseaddr
 
 import pandas as pd
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
+from openpyxl.styles import PatternFill
 
 try:
     import win32com.client as win32
 except ImportError:
     win32 = None
+
+try:
+    import pythoncom
+except ImportError:
+    pythoncom = None
 
 app = Flask(__name__)
 app.secret_key = os.getenv("FLASK_SECRET_KEY", "email-sender-dev-secret")
@@ -36,6 +42,12 @@ WORKFLOWS = [
 WORKFLOW_MAP = dict(WORKFLOWS)
 DEFAULT_WORKFLOW = WORKFLOWS[0][0]
 NO_INFO_WORKFLOWS = {"bv-ortho-no-info", "bv-dental-no-info"}
+RSTC_HIGHLIGHT_WORKFLOWS = {
+    "ev-ortho-rstc",
+    "ev-dental-rstc",
+    "bv-ortho-rstc",
+    "bv-dental-rstc",
+}
 STATE_BY_WORKFLOW = {
     workflow_id: {
         "records": [],
@@ -250,11 +262,46 @@ def get_smtp_server():
     return smtp_server, smtp_from
 
 
-def to_excel_bytes(rows):
+def to_excel_bytes(rows, workflow_id):
     output = BytesIO()
     df = pd.DataFrame(rows)
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
         df.to_excel(writer, index=False)
+        worksheet = writer.book.active
+
+        if not df.empty and len(df.columns) > 0:
+            green_header_fill = PatternFill(
+                start_color="A9D08E",
+                end_color="A9D08E",
+                fill_type="solid",
+            )
+            for excel_col_idx in range(1, len(df.columns) + 1):
+                worksheet.cell(row=1, column=excel_col_idx).fill = green_header_fill
+
+        if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS and not df.empty:
+            normalized_cols = [normalize_column_name(col) for col in df.columns]
+            status_col_indexes = [
+                idx
+                for idx, normalized_name in enumerate(normalized_cols)
+                if normalized_name in {"status", "statuscode"}
+            ]
+            if status_col_indexes:
+                yellow_fill = PatternFill(
+                    start_color="FFF59D",
+                    end_color="FFF59D",
+                    fill_type="solid",
+                )
+                for df_row_idx, row_values in enumerate(df.itertuples(index=False), start=2):
+                    should_highlight = False
+                    for col_idx in status_col_indexes:
+                        value = row_values[col_idx]
+                        text_value = "" if pd.isna(value) else str(value).strip().upper()
+                        if text_value != "BV":
+                            should_highlight = True
+                            break
+                    if should_highlight:
+                        for excel_col_idx in range(1, len(df.columns) + 1):
+                            worksheet.cell(row=df_row_idx, column=excel_col_idx).fill = yellow_fill
     return output.getvalue()
 
 
@@ -314,7 +361,7 @@ Regards,
 Mushtaq Memon
 """
         body_html = None
-        attachment_bytes = to_excel_bytes(record["slice_rows"])
+        attachment_bytes = to_excel_bytes(record["slice_rows"], workflow_id)
         office_name_for_file = safe_file_name(record["office_name"]) or record.get("safe_name") or "Report"
         us_date_for_file = datetime.now().strftime("%m-%d-%Y")
         attachment_name = f"{office_name_for_file} {us_date_for_file}.xlsx"
@@ -511,6 +558,11 @@ def send_records(workflow_id, record_ids=None):
     state = STATE_BY_WORKFLOW[workflow_id]
     use_outlook_windows = os.name == "nt" and win32 is not None
     use_outlook_mac = sys.platform == "darwin"
+    com_initialized = False
+
+    if use_outlook_windows and pythoncom is not None:
+        pythoncom.CoInitialize()
+        com_initialized = True
 
     outlook = win32.Dispatch("outlook.application") if use_outlook_windows else None
     smtp_server = None
@@ -555,6 +607,8 @@ def send_records(workflow_id, record_ids=None):
     finally:
         if smtp_server is not None:
             smtp_server.quit()
+        if com_initialized and pythoncom is not None:
+            pythoncom.CoUninitialize()
 
 
 @app.get("/")
@@ -664,12 +718,36 @@ def preview_slice(workflow_id, record_id):
     try:
         df = pd.DataFrame(record["slice_rows"])
         rows = sanitize_rows_for_json(df.head(200).to_dict(orient="records"))
+        highlight_flags = []
+        if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS and not df.empty:
+            normalized_cols = [normalize_column_name(col) for col in df.columns]
+            status_col_indexes = [
+                idx
+                for idx, normalized_name in enumerate(normalized_cols)
+                if normalized_name in {"status", "statuscode"}
+            ]
+            if status_col_indexes:
+                preview_df = df.head(200)
+                for row_values in preview_df.itertuples(index=False):
+                    should_highlight = False
+                    for col_idx in status_col_indexes:
+                        value = row_values[col_idx]
+                        text_value = "" if pd.isna(value) else str(value).strip().upper()
+                        if text_value != "BV":
+                            should_highlight = True
+                            break
+                    highlight_flags.append(should_highlight)
+            else:
+                highlight_flags = [False] * len(rows)
+        else:
+            highlight_flags = [False] * len(rows)
         return jsonify(
             {
                 "ok": True,
                 "office_name": record["office_name"],
                 "columns": list(df.columns),
                 "rows": rows,
+                "highlight_flags": highlight_flags,
             }
         )
     except Exception as e:
