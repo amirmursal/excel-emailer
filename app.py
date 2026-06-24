@@ -7,14 +7,14 @@ import tempfile
 import uuid
 import shutil
 import html
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 from email.message import EmailMessage
 from email.utils import parseaddr
 
 import pandas as pd
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
 try:
     import win32com.client as win32
@@ -42,6 +42,8 @@ WORKFLOWS = [
 WORKFLOW_MAP = dict(WORKFLOWS)
 DEFAULT_WORKFLOW = WORKFLOWS[0][0]
 NO_INFO_WORKFLOWS = {"bv-ortho-no-info", "bv-dental-no-info"}
+EV_RSTC_WORKFLOWS = {"ev-ortho-rstc", "ev-dental-rstc"}
+BV_PREV_DAY_WORKFLOWS = {"bv-ortho-rstc", "bv-dental-rstc"}
 RSTC_HIGHLIGHT_WORKFLOWS = {
     "ev-ortho-rstc",
     "ev-dental-rstc",
@@ -123,6 +125,24 @@ def filter_no_info_rows(df, column_names):
     for column_name in column_names:
         mask = mask | df[column_name].apply(has_no_info_text)
     return df[mask]
+
+
+def format_date_columns_in_df(df):
+    formatted_df = df.copy()
+    target_columns = {"appoinmentdate", "dob"}
+    for column_name in formatted_df.columns:
+        if normalize_column_name(column_name) not in target_columns:
+            continue
+
+        parsed_dates = pd.to_datetime(formatted_df[column_name], errors="coerce")
+        formatted_values = parsed_dates.dt.strftime("%m/%d/%Y")
+
+        original_values = formatted_df[column_name]
+        formatted_df[column_name] = [
+            formatted if pd.notna(parsed) else ("" if pd.isna(original) else str(original))
+            for original, parsed, formatted in zip(original_values, parsed_dates, formatted_values)
+        ]
+    return formatted_df
 
 
 def dataframe_rows_to_text(rows):
@@ -270,13 +290,28 @@ def to_excel_bytes(rows, workflow_id):
         worksheet = writer.book.active
 
         if not df.empty and len(df.columns) > 0:
+            thin_side = Side(style="thin", color="BFBFBF")
+            thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
+            centered = Alignment(horizontal="center", vertical="center")
+
+            # Apply table-like formatting (borders + centered text) to header and data cells.
+            max_row = len(df.index) + 1
+            max_col = len(df.columns)
+            for row_idx in range(1, max_row + 1):
+                for col_idx in range(1, max_col + 1):
+                    cell = worksheet.cell(row=row_idx, column=col_idx)
+                    cell.border = thin_border
+                    cell.alignment = centered
+
             green_header_fill = PatternFill(
                 start_color="A9D08E",
                 end_color="A9D08E",
                 fill_type="solid",
             )
             for excel_col_idx in range(1, len(df.columns) + 1):
-                worksheet.cell(row=1, column=excel_col_idx).fill = green_header_fill
+                header_cell = worksheet.cell(row=1, column=excel_col_idx)
+                header_cell.fill = green_header_fill
+                header_cell.font = Font(bold=True)
 
         if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS and not df.empty:
             normalized_cols = [normalize_column_name(col) for col in df.columns]
@@ -296,7 +331,7 @@ def to_excel_bytes(rows, workflow_id):
                     for col_idx in status_col_indexes:
                         value = row_values[col_idx]
                         text_value = "" if pd.isna(value) else str(value).strip().upper()
-                        if text_value != "BV":
+                        if text_value not in {"BV", "EV"}:
                             should_highlight = True
                             break
                     if should_highlight:
@@ -326,7 +361,15 @@ def create_named_attachment_tempfile(attachment_name, attachment_bytes):
 
 
 def send_email(record, workflow_id, use_outlook_windows, use_outlook_mac, outlook, smtp_server, smtp_from):
-    subject = f"BV Report - {record['office_name']}"
+    if workflow_uses_no_info_body_mode(workflow_id):
+        subject = f"{record['office_name']} No Information - ({datetime.now().strftime('%m/%d/%Y')})"
+    elif workflow_id in EV_RSTC_WORKFLOWS:
+        subject = f"{record['office_name']} Dental Eligibility Report - Appt Date ({datetime.now().strftime('%m/%d/%Y')})"
+    elif workflow_id in BV_PREV_DAY_WORKFLOWS:
+        previous_day = (datetime.now() - timedelta(days=1)).strftime("%m/%d/%Y")
+        subject = f"{record['office_name']} BV Report - ({previous_day})"
+    else:
+        subject = f"BV Report - {record['office_name']}"
     use_inline_no_info = workflow_uses_no_info_body_mode(workflow_id)
     if use_inline_no_info:
         table_text = dataframe_rows_to_text(record["slice_rows"])
@@ -363,7 +406,10 @@ Mushtaq Memon
         body_html = None
         attachment_bytes = to_excel_bytes(record["slice_rows"], workflow_id)
         office_name_for_file = safe_file_name(record["office_name"]) or record.get("safe_name") or "Report"
-        us_date_for_file = datetime.now().strftime("%m-%d-%Y")
+        if workflow_id in BV_PREV_DAY_WORKFLOWS:
+            us_date_for_file = (datetime.now() - timedelta(days=1)).strftime("%m-%d-%Y")
+        else:
+            us_date_for_file = datetime.now().strftime("%m-%d-%Y")
         attachment_name = f"{office_name_for_file} {us_date_for_file}.xlsx"
 
     if use_outlook_windows and outlook is not None:
@@ -520,12 +566,14 @@ def build_records(workflow_id, email_bytes, data_bytes):
         record["can_send"] = True
         record["safe_name"] = clean_name
         record["row_count"] = len(filtered_df)
-        record["slice_rows"] = filtered_df.fillna("").to_dict(orient="records")
+        formatted_filtered_df = format_date_columns_in_df(filtered_df)
+        record["slice_rows"] = formatted_filtered_df.fillna("").to_dict(orient="records")
         records.append(record)
 
     unmatched_data_df = data_df[(~office_names.isin(doctor_name_set)) & (office_names != "")]
     if workflow_uses_no_info_body_mode(workflow_id):
         unmatched_data_df = filter_no_info_rows(unmatched_data_df, no_info_columns)
+    unmatched_data_df = format_date_columns_in_df(unmatched_data_df)
     unmatched_rows = unmatched_data_df.fillna("").to_dict(orient="records")
     if unmatched_rows:
         records.append(
@@ -733,7 +781,7 @@ def preview_slice(workflow_id, record_id):
                     for col_idx in status_col_indexes:
                         value = row_values[col_idx]
                         text_value = "" if pd.isna(value) else str(value).strip().upper()
-                        if text_value != "BV":
+                        if text_value not in {"BV", "EV"}:
                             should_highlight = True
                             break
                     highlight_flags.append(should_highlight)
