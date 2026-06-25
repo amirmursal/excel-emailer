@@ -129,7 +129,7 @@ def filter_no_info_rows(df, column_names):
 
 def format_date_columns_in_df(df):
     formatted_df = df.copy()
-    target_columns = {"appoinmentdate", "dob"}
+    target_columns = {"appointment", "appoinmentdate", "appointmentdate", "dob"}
     for column_name in formatted_df.columns:
         if normalize_column_name(column_name) not in target_columns:
             continue
@@ -143,6 +143,15 @@ def format_date_columns_in_df(df):
             for original, parsed, formatted in zip(original_values, parsed_dates, formatted_values)
         ]
     return formatted_df
+
+
+def format_date_for_display(value):
+    if pd.isna(value):
+        return ""
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.notna(parsed):
+        return parsed.strftime("%m/%d/%Y")
+    return str(value).strip()
 
 
 def dataframe_rows_to_text(rows):
@@ -198,39 +207,48 @@ on run argv
 	set theHtmlBody to item 5 of argv
 	set attachmentPath to item 6 of argv
 	
-	tell application "Microsoft Outlook"
-		if theHtmlBody is not "" then
-			set newMessage to make new outgoing message with properties {subject:theSubject, content:theHtmlBody}
-		else
-			set newMessage to make new outgoing message with properties {subject:theSubject, content:theBody}
-		end if
-		tell newMessage
-			if toList is not "" then
-				set AppleScript's text item delimiters to ","
-				repeat with recipientAddress in text items of toList
-					set trimmedTo to my trim_text(recipientAddress as text)
-					if trimmedTo is not "" then
-						make new to recipient at end of to recipients with properties {email address:{address:trimmedTo}}
-					end if
-				end repeat
+	try
+		tell application "Microsoft Outlook"
+			if theHtmlBody is not "" then
+				set newMessage to make new outgoing message with properties {subject:theSubject, content:theHtmlBody}
+			else
+				set newMessage to make new outgoing message with properties {subject:theSubject, content:theBody}
 			end if
-			
-			if ccList is not "" then
-				set AppleScript's text item delimiters to ","
-				repeat with recipientAddress in text items of ccList
-					set trimmedCc to my trim_text(recipientAddress as text)
-					if trimmedCc is not "" then
-						make new cc recipient at end of cc recipients with properties {email address:{address:trimmedCc}}
-					end if
-				end repeat
-			end if
-			
-			if attachmentPath is not "" then
-				make new attachment with properties {file:(POSIX file attachmentPath)}
-			end if
-			send
+			tell newMessage
+				if toList is not "" then
+					set AppleScript's text item delimiters to ","
+					repeat with recipientAddress in text items of toList
+						set trimmedTo to my trim_text(recipientAddress as text)
+						if trimmedTo is not "" then
+							make new to recipient at end of to recipients with properties {email address:{address:trimmedTo}}
+						end if
+					end repeat
+				end if
+				
+				if ccList is not "" then
+					set AppleScript's text item delimiters to ","
+					repeat with recipientAddress in text items of ccList
+						set trimmedCc to my trim_text(recipientAddress as text)
+						if trimmedCc is not "" then
+							make new cc recipient at end of cc recipients with properties {email address:{address:trimmedCc}}
+						end if
+					end repeat
+				end if
+				
+				if attachmentPath is not "" then
+					try
+						set attachmentAlias to (POSIX file attachmentPath) as alias
+						make new attachment with properties {file:attachmentAlias}
+					on error
+						make new attachment with properties {file:(POSIX file attachmentPath)}
+					end try
+				end if
+				send
+			end tell
 		end tell
-	end tell
+	on error errMsg number errNum
+		error "Outlook AppleScript failed (" & errNum & "): " & errMsg
+	end try
 end run
 
 on trim_text(theText)
@@ -243,20 +261,24 @@ on trim_text(theText)
 	return trimmedText
 end trim_text
 """
-    subprocess.run(
-        [
-            "osascript",
-            "-e",
-            script,
-            ",".join(to_email_list),
-            ",".join(cc_email_list),
-            subject,
-            body,
-            html_body,
-            file_path,
-        ],
-        check=True,
-    )
+    command = [
+        "osascript",
+        "-e",
+        script,
+        ",".join(to_email_list),
+        ",".join(cc_email_list),
+        subject,
+        body,
+        html_body,
+        file_path,
+    ]
+    try:
+        subprocess.run(command, check=True, capture_output=True, text=True)
+    except subprocess.CalledProcessError as exc:
+        stderr = (exc.stderr or "").strip()
+        stdout = (exc.stdout or "").strip()
+        details = stderr or stdout or str(exc)
+        raise RuntimeError(details) from exc
 
 
 def get_smtp_server():
@@ -364,7 +386,8 @@ def send_email(record, workflow_id, use_outlook_windows, use_outlook_mac, outloo
     if workflow_uses_no_info_body_mode(workflow_id):
         subject = f"{record['office_name']} No Information - ({datetime.now().strftime('%m/%d/%Y')})"
     elif workflow_id in EV_RSTC_WORKFLOWS:
-        subject = f"{record['office_name']} Dental Eligibility Report - Appt Date ({datetime.now().strftime('%m/%d/%Y')})"
+        appointment_date = record.get("appointment_date") or datetime.now().strftime("%m/%d/%Y")
+        subject = f"{record['office_name']} Dental Eligibility Report - Appt Date ({appointment_date})"
     elif workflow_id in BV_PREV_DAY_WORKFLOWS:
         previous_day = (datetime.now() - timedelta(days=1)).strftime("%m/%d/%Y")
         subject = f"{record['office_name']} BV Report - ({previous_day})"
@@ -513,6 +536,7 @@ def build_records(workflow_id, email_bytes, data_bytes):
     cc_col = find_column(email_df, "BV Report Send CC")
     office_col = find_column(data_df, "Office Name")
     no_info_columns = []
+    ev_appointment_col = None
     if workflow_uses_no_info_body_mode(workflow_id):
         no_info_columns = [
             find_column(data_df, "Insurance"),
@@ -521,6 +545,14 @@ def build_records(workflow_id, email_bytes, data_bytes):
             find_column(data_df, "Subscriber Name"),
             find_column(data_df, "Subscriber DOB"),
         ]
+    elif workflow_id in EV_RSTC_WORKFLOWS:
+        try:
+            ev_appointment_col = find_column(data_df, "Appointment")
+        except ValueError:
+            try:
+                ev_appointment_col = find_column(data_df, "Appoinment Date")
+            except ValueError:
+                ev_appointment_col = None
     office_names = data_df[office_col].fillna("").astype(str).str.strip()
     doctor_names = email_df[doctor_col].fillna("").astype(str).str.strip()
     doctor_name_set = {name for name in doctor_names if name and name.lower() != "nan"}
@@ -537,6 +569,7 @@ def build_records(workflow_id, email_bytes, data_bytes):
         record = {
             "id": str(uuid.uuid4()),
             "office_name": doctor,
+            "appointment_date": "",
             "safe_name": "",
             "to": to_email_list,
             "cc": cc_email_list,
@@ -562,13 +595,29 @@ def build_records(workflow_id, email_bytes, data_bytes):
             skipped_no_data += 1
             continue
 
-        clean_name = safe_file_name(doctor.replace(".", "").replace("&", "and")) or "Report"
-        record["can_send"] = True
-        record["safe_name"] = clean_name
-        record["row_count"] = len(filtered_df)
         formatted_filtered_df = format_date_columns_in_df(filtered_df)
-        record["slice_rows"] = formatted_filtered_df.fillna("").to_dict(orient="records")
-        records.append(record)
+        clean_name = safe_file_name(doctor.replace(".", "").replace("&", "and")) or "Report"
+
+        if workflow_id in EV_RSTC_WORKFLOWS and ev_appointment_col and ev_appointment_col in formatted_filtered_df.columns:
+            grouped = formatted_filtered_df.groupby(ev_appointment_col, dropna=False, sort=False)
+            for appointment_value, appointment_df in grouped:
+                appointment_date = format_date_for_display(appointment_value)
+                grouped_record = record.copy()
+                grouped_record["id"] = str(uuid.uuid4())
+                grouped_record["can_send"] = True
+                grouped_record["appointment_date"] = appointment_date
+                grouped_record["safe_name"] = (
+                    safe_file_name(f"{clean_name} {appointment_date}") or clean_name
+                )
+                grouped_record["row_count"] = len(appointment_df)
+                grouped_record["slice_rows"] = appointment_df.fillna("").to_dict(orient="records")
+                records.append(grouped_record)
+        else:
+            record["can_send"] = True
+            record["safe_name"] = clean_name
+            record["row_count"] = len(formatted_filtered_df)
+            record["slice_rows"] = formatted_filtered_df.fillna("").to_dict(orient="records")
+            records.append(record)
 
     unmatched_data_df = data_df[(~office_names.isin(doctor_name_set)) & (office_names != "")]
     if workflow_uses_no_info_body_mode(workflow_id):

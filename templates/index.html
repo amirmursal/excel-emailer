@@ -233,6 +233,7 @@
                 <thead>
                   <tr>
                     <th>Office Name</th>
+                    <th>Appointment Date</th>
                     <th>To</th>
                     <th>CC</th>
                     <th>Rows</th>
@@ -246,6 +247,7 @@
                     {% for r in records %}
                       <tr>
                         <td>{{ r.office_name }}</td>
+                        <td>{{ r.appointment_date }}</td>
                         <td>{{ ", ".join(r.to) }}</td>
                         <td>{{ ", ".join(r.cc) }}</td>
                         <td>{{ r.row_count }}</td>
@@ -262,7 +264,7 @@
                       </tr>
                     {% endfor %}
                   {% else %}
-                    <tr><td colspan="7" class="small">No records yet. Upload both files.</td></tr>
+                    <tr><td colspan="8" class="small">No records yet. Upload both files.</td></tr>
                   {% endif %}
                 </tbody>
               </table>
