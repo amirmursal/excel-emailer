@@ -311,12 +311,12 @@ def to_excel_bytes(rows, workflow_id):
         df.to_excel(writer, index=False)
         worksheet = writer.book.active
 
-        if not df.empty and len(df.columns) > 0:
-            thin_side = Side(style="thin", color="BFBFBF")
+        if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS and len(df.columns) > 0:
+            thin_side = Side(style="thin", color="000000")
             thin_border = Border(left=thin_side, right=thin_side, top=thin_side, bottom=thin_side)
             centered = Alignment(horizontal="center", vertical="center")
 
-            # Apply table-like formatting (borders + centered text) to header and data cells.
+            # Apply table-like formatting (thin borders + centered text) to header and data cells.
             max_row = len(df.index) + 1
             max_col = len(df.columns)
             for row_idx in range(1, max_row + 1):
@@ -325,6 +325,18 @@ def to_excel_bytes(rows, workflow_id):
                     cell.border = thin_border
                     cell.alignment = centered
 
+            # Auto-fit each column width based on max content length (header + cells).
+            for col_idx, column_name in enumerate(df.columns, start=1):
+                max_len = len(str(column_name))
+                for value in df[column_name].tolist():
+                    value_len = len("" if pd.isna(value) else str(value))
+                    if value_len > max_len:
+                        max_len = value_len
+                worksheet.column_dimensions[worksheet.cell(row=1, column=col_idx).column_letter].width = min(
+                    max(12, max_len + 2), 80
+                )
+
+        if not df.empty and len(df.columns) > 0:
             green_header_fill = PatternFill(
                 start_color="A9D08E",
                 end_color="A9D08E",
