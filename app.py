@@ -409,9 +409,9 @@ def send_email(record, workflow_id, use_outlook_windows, use_outlook_mac, outloo
     if use_inline_no_info:
         table_text = dataframe_rows_to_text(record["slice_rows"])
         table_html = dataframe_rows_to_html_table(record["slice_rows"])
-        body = f"""Hi,
+        body = f"""Hello,
 
-Please review below no-info rows for {record['office_name']}:
+Kindly note that we were unable to locate the insurance information for the patient mentioned below in our system. We request you to kindly share the patient's insurance details via email so that we can verify the coverage and benefits accordingly.
 
 {table_text}
 
@@ -421,8 +421,8 @@ Mushtaq Memon
         body_html = f"""
 <html>
   <body style="font-family: Calibri, Arial, sans-serif; font-size: 13px; color: #1f2937;">
-    <p>Hi,</p>
-    <p>Please review below no-info rows for <b>{html.escape(record['office_name'])}</b>:</p>
+    <p>Hello,</p>
+    <p>Kindly note that we were unable to locate the insurance information for the patient mentioned below in our system. We request you to kindly share the patient's insurance details via email so that we can verify the coverage and benefits accordingly.</p>
     {table_html}
     <p style="margin-top: 16px;">Regards,<br/>Mushtaq Memon</p>
   </body>
