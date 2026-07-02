@@ -129,19 +129,38 @@ def filter_no_info_rows(df, column_names):
 
 def format_date_columns_in_df(df):
     formatted_df = df.copy()
-    target_columns = {"appointment", "appoinmentdate", "appointmentdate", "dob"}
+    target_columns = {
+        "appointment",
+        "appoinment",
+        "appointmentdate",
+        "appoinmentdate",
+        "apptdate",
+        "dob",
+        "dos",
+        "dosdate",
+        "dosdob",
+        "DOS/DOB",
+    }
     for column_name in formatted_df.columns:
         if normalize_column_name(column_name) not in target_columns:
             continue
 
-        parsed_dates = pd.to_datetime(formatted_df[column_name], errors="coerce")
-        formatted_values = parsed_dates.dt.strftime("%m/%d/%Y")
-
         original_values = formatted_df[column_name]
-        formatted_df[column_name] = [
-            formatted if pd.notna(parsed) else ("" if pd.isna(original) else str(original))
-            for original, parsed, formatted in zip(original_values, parsed_dates, formatted_values)
-        ]
+        converted_values = []
+        for original in original_values:
+            if pd.isna(original):
+                converted_values.append("")
+                continue
+
+            # Parse value-by-value so mixed formats (e.g. MM/DD/YYYY + ISO datetime)
+            # are consistently normalized.
+            parsed = pd.to_datetime(original, errors="coerce")
+            if pd.notna(parsed):
+                converted_values.append(parsed.strftime("%m/%d/%Y"))
+            else:
+                converted_values.append(str(original))
+
+        formatted_df[column_name] = converted_values
     return formatted_df
 
 
