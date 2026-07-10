@@ -50,6 +50,13 @@ RSTC_HIGHLIGHT_WORKFLOWS = {
     "bv-ortho-rstc",
     "bv-dental-rstc",
 }
+EV_PDF_UPLOAD_OFFICE_NAMES = {"FREDPEDO", "MUSGROVE", "REISTERS"}
+EV_EXCLUDED_OUTPUT_COLUMNS = {
+    "officename",
+    "patientsname",
+    "patientidchart",
+    "status",
+}
 STATE_BY_WORKFLOW = {
     workflow_id: {
         "records": [],
@@ -91,6 +98,13 @@ def find_column(df, expected_name):
     )
 
 
+def find_optional_column(df, expected_name):
+    try:
+        return find_column(df, expected_name)
+    except ValueError:
+        return None
+
+
 def clean_recipients(raw_value):
     if pd.isna(raw_value):
         return []
@@ -109,6 +123,13 @@ def clean_recipients(raw_value):
 
 def workflow_uses_no_info_body_mode(workflow_id):
     return workflow_id in NO_INFO_WORKFLOWS
+
+
+def should_attach_extra_pdf(workflow_id, office_name):
+    return (
+        workflow_id in EV_RSTC_WORKFLOWS
+        and str(office_name).strip().upper() in EV_PDF_UPLOAD_OFFICE_NAMES
+    )
 
 
 def has_no_info_text(value):
@@ -173,6 +194,67 @@ def format_date_for_display(value):
     return str(value).strip()
 
 
+def split_patient_name(raw_name):
+    if pd.isna(raw_name):
+        return "", ""
+    text = str(raw_name).strip()
+    if not text:
+        return "", ""
+    if "," in text:
+        last_name, first_name = text.split(",", 1)
+        return last_name.strip(), first_name.strip()
+    return text, ""
+
+
+def transform_fredpedo_slice_df(df):
+    patient_name_col = find_optional_column(df, "Patients Name")
+    dob_col = find_optional_column(df, "DOB")
+    insurance_col = find_optional_column(df, "Insurance")
+    carrier_phone_col = find_optional_column(df, "Carrier Phone")
+    subscriber_name_col = find_optional_column(df, "Subscriber Name")
+    policy_id_col = find_optional_column(df, "Policy ID")
+    subscriber_dob_col = find_optional_column(df, "Subscriber DOB")
+    appointment_col = (
+        find_optional_column(df, "Appointment")
+        or find_optional_column(df, "Appointment Date")
+        or find_optional_column(df, "Appoinment Date")
+    )
+    comments_col = find_optional_column(df, "Comments")
+
+    transformed_rows = []
+    for _, row in df.iterrows():
+        pats_last_name, pats_first_name = split_patient_name(
+            row[patient_name_col] if patient_name_col else ""
+        )
+
+        transformed_rows.append(
+            {
+                "PatsLastName": pats_last_name,
+                "PatsFirstName": pats_first_name,
+                "PatsBirthDate": row[dob_col] if dob_col else "",
+                "CarrierName": row[insurance_col] if insurance_col else "",
+                "CarrierPhone": row[carrier_phone_col] if carrier_phone_col else "",
+                "EmpName": row[subscriber_name_col] if subscriber_name_col else "",
+                "PolEmployeeSSN": row[policy_id_col] if policy_id_col else "",
+                "EmployeeBirthDate": row[subscriber_dob_col] if subscriber_dob_col else "",
+                "GroupName": "",
+                "FutureAppt": row[appointment_col] if appointment_col else "",
+                "comments": row[comments_col] if comments_col else "",
+            }
+        )
+
+    return pd.DataFrame(transformed_rows)
+
+
+def drop_columns_by_normalized_name(df, normalized_names_to_drop):
+    keep_columns = [
+        column_name
+        for column_name in df.columns
+        if normalize_column_name(column_name) not in normalized_names_to_drop
+    ]
+    return df[keep_columns].copy()
+
+
 def dataframe_rows_to_text(rows):
     if not rows:
         return "No rows found."
@@ -216,7 +298,7 @@ def dataframe_rows_to_html_table(rows):
 """
 
 
-def send_via_outlook_mac(to_email_list, cc_email_list, subject, body, html_body, file_path):
+def send_via_outlook_mac(to_email_list, cc_email_list, subject, body, html_body, attachment_paths):
     script = """
 on run argv
 	set toList to item 1 of argv
@@ -224,7 +306,7 @@ on run argv
 	set theSubject to item 3 of argv
 	set theBody to item 4 of argv
 	set theHtmlBody to item 5 of argv
-	set attachmentPath to item 6 of argv
+	set attachmentPaths to item 6 of argv
 	
 	try
 		tell application "Microsoft Outlook"
@@ -237,7 +319,7 @@ on run argv
 				if toList is not "" then
 					set AppleScript's text item delimiters to ","
 					repeat with recipientAddress in text items of toList
-						set trimmedTo to my trim_text(recipientAddress as text)
+						set trimmedTo to my trim_edges(recipientAddress as text)
 						if trimmedTo is not "" then
 							make new to recipient at end of to recipients with properties {email address:{address:trimmedTo}}
 						end if
@@ -247,20 +329,26 @@ on run argv
 				if ccList is not "" then
 					set AppleScript's text item delimiters to ","
 					repeat with recipientAddress in text items of ccList
-						set trimmedCc to my trim_text(recipientAddress as text)
+						set trimmedCc to my trim_edges(recipientAddress as text)
 						if trimmedCc is not "" then
 							make new cc recipient at end of cc recipients with properties {email address:{address:trimmedCc}}
 						end if
 					end repeat
 				end if
 				
-				if attachmentPath is not "" then
-					try
-						set attachmentAlias to (POSIX file attachmentPath) as alias
-						make new attachment with properties {file:attachmentAlias}
-					on error
-						make new attachment with properties {file:(POSIX file attachmentPath)}
-					end try
+				if attachmentPaths is not "" then
+					set AppleScript's text item delimiters to linefeed
+					repeat with attachmentPath in text items of attachmentPaths
+						set trimmedAttachment to my trim_edges(attachmentPath as text)
+						if trimmedAttachment is not "" then
+							try
+								set attachmentAlias to (POSIX file trimmedAttachment) as alias
+								make new attachment with properties {file:attachmentAlias}
+							on error
+								make new attachment with properties {file:(POSIX file trimmedAttachment)}
+							end try
+						end if
+					end repeat
 				end if
 				send
 			end tell
@@ -270,15 +358,18 @@ on run argv
 	end try
 end run
 
-on trim_text(theText)
-	set tid to AppleScript's text item delimiters
-	set AppleScript's text item delimiters to {" ", tab, return, linefeed}
-	set textItems to text items of theText
-	set AppleScript's text item delimiters to ""
-	set trimmedText to textItems as text
-	set AppleScript's text item delimiters to tid
-	return trimmedText
-end trim_text
+on trim_edges(theText)
+	set t to theText as text
+	repeat while t begins with " " or t begins with tab or t begins with return or t begins with linefeed
+		if (length of t) ≤ 1 then return ""
+		set t to text 2 thru -1 of t
+	end repeat
+	repeat while t ends with " " or t ends with tab or t ends with return or t ends with linefeed
+		if (length of t) ≤ 1 then return ""
+		set t to text 1 thru -2 of t
+	end repeat
+	return t
+end trim_edges
 """
     command = [
         "osascript",
@@ -289,7 +380,7 @@ end trim_text
         subject,
         body,
         html_body,
-        file_path,
+        "\n".join(attachment_paths),
     ]
     try:
         subprocess.run(command, check=True, capture_output=True, text=True)
@@ -414,7 +505,24 @@ def create_named_attachment_tempfile(attachment_name, attachment_bytes):
 
 
 def send_email(record, workflow_id, use_outlook_windows, use_outlook_mac, outlook, smtp_server, smtp_from):
-    if workflow_uses_no_info_body_mode(workflow_id):
+    office_name_upper = str(record.get("office_name", "")).strip().upper()
+    if office_name_upper == "FREDPEDO":
+        appointment_for_subject = format_date_for_display(record.get("appointment_date", ""))
+        if appointment_for_subject:
+            appointment_for_subject = appointment_for_subject.replace("/", ".")
+        else:
+            appointment_for_subject = datetime.now().strftime("%m.%d.%Y")
+        subject = f"FREDPEDO DENTAL ELIGIBILITY REPORT FOR DOS {appointment_for_subject}"
+    elif office_name_upper == "MUSGROVE":
+        appointment_for_subject = format_date_for_display(record.get("appointment_date", ""))
+        if appointment_for_subject:
+            appointment_for_subject = appointment_for_subject.replace("/", "")
+        else:
+            appointment_for_subject = datetime.now().strftime("%m%d%Y")
+        subject = (
+            f"MUSGROVE DENTAL ELIGIBLITY AND HISTORIES REPORT FOR DOS {appointment_for_subject}"
+        )
+    elif workflow_uses_no_info_body_mode(workflow_id):
         subject = f"{record['office_name']} No Information - ({datetime.now().strftime('%m/%d/%Y')})"
     elif workflow_id in EV_RSTC_WORKFLOWS:
         appointment_date = record.get("appointment_date") or datetime.now().strftime("%m/%d/%Y")
@@ -460,17 +568,68 @@ Mushtaq Memon
         body_html = None
         attachment_bytes = to_excel_bytes(record["slice_rows"], workflow_id)
         office_name_for_file = safe_file_name(record["office_name"]) or record.get("safe_name") or "Report"
-        if workflow_id in BV_PREV_DAY_WORKFLOWS:
+        office_name_upper = str(record.get("office_name", "")).strip().upper()
+        if office_name_upper == "FREDPEDO":
+            appointment_for_name = format_date_for_display(record.get("appointment_date", ""))
+            if appointment_for_name:
+                appointment_for_name = appointment_for_name.replace("/", ".")
+            else:
+                appointment_for_name = datetime.now().strftime("%m.%d.%Y")
+            attachment_name = (
+                f"FREDPEDO DENTAL ELIGIBILITY REPORT FOR DOS {appointment_for_name}.xlsx"
+            )
+        elif office_name_upper == "MUSGROVE":
+            appointment_for_name = format_date_for_display(record.get("appointment_date", ""))
+            if appointment_for_name:
+                appointment_for_name = appointment_for_name.replace("/", "")
+            else:
+                appointment_for_name = datetime.now().strftime("%m%d%Y")
+            attachment_name = (
+                f"MUSGROVE DENTAL ELIGIBLITY AND HISTORIES REPORT FOR DOS {appointment_for_name}.xlsx"
+            )
+        elif workflow_id in BV_PREV_DAY_WORKFLOWS:
             us_date_for_file = (datetime.now() - timedelta(days=1)).strftime("%m-%d-%Y")
+            attachment_name = f"{office_name_for_file} {us_date_for_file}.xlsx"
         else:
             us_date_for_file = datetime.now().strftime("%m-%d-%Y")
-        attachment_name = f"{office_name_for_file} {us_date_for_file}.xlsx"
+            attachment_name = f"{office_name_for_file} {us_date_for_file}.xlsx"
+
+    attachments_for_send = []
+    if not use_inline_no_info:
+        attachments_for_send.append(
+            {
+                "name": attachment_name,
+                "bytes": attachment_bytes,
+                "maintype": "application",
+                "subtype": "vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            }
+        )
+
+    extra_pdf_bytes = record.get("extra_pdf_bytes")
+    extra_pdf_name = record.get("extra_pdf_name")
+    if (
+        should_attach_extra_pdf(workflow_id, record.get("office_name", ""))
+        and extra_pdf_bytes
+        and extra_pdf_name
+    ):
+        attachments_for_send.append(
+            {
+                "name": extra_pdf_name,
+                "bytes": extra_pdf_bytes,
+                "maintype": "application",
+                "subtype": "pdf",
+            }
+        )
 
     if use_outlook_windows and outlook is not None:
-        temp_path = None
-        temp_dir = None
-        if not use_inline_no_info:
-            temp_path, temp_dir = create_named_attachment_tempfile(attachment_name, attachment_bytes)
+        temp_paths = []
+        temp_dirs = []
+        for attachment in attachments_for_send:
+            temp_path, temp_dir = create_named_attachment_tempfile(
+                attachment["name"], attachment["bytes"]
+            )
+            temp_paths.append(temp_path)
+            temp_dirs.append(temp_dir)
         try:
             mail = outlook.CreateItem(0)
             mail.To = "; ".join(record["to"])
@@ -480,20 +639,24 @@ Mushtaq Memon
                 mail.HTMLBody = body_html
             else:
                 mail.Body = body
-            if temp_path:
+            for temp_path in temp_paths:
                 mail.Attachments.Add(temp_path)
             mail.Send()
         finally:
-            if temp_dir:
+            for temp_dir in temp_dirs:
                 try:
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 except OSError:
                     pass
     elif use_outlook_mac:
-        temp_path = None
-        temp_dir = None
-        if not use_inline_no_info:
-            temp_path, temp_dir = create_named_attachment_tempfile(attachment_name, attachment_bytes)
+        temp_paths = []
+        temp_dirs = []
+        for attachment in attachments_for_send:
+            temp_path, temp_dir = create_named_attachment_tempfile(
+                attachment["name"], attachment["bytes"]
+            )
+            temp_paths.append(temp_path)
+            temp_dirs.append(temp_dir)
         try:
             send_via_outlook_mac(
                 record["to"],
@@ -501,10 +664,10 @@ Mushtaq Memon
                 subject,
                 body,
                 body_html or "",
-                temp_path or "",
+                temp_paths,
             )
         finally:
-            if temp_dir:
+            for temp_dir in temp_dirs:
                 try:
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 except OSError:
@@ -519,12 +682,12 @@ Mushtaq Memon
         message.set_content(body)
         if use_inline_no_info and body_html:
             message.add_alternative(body_html, subtype="html")
-        if not use_inline_no_info:
+        for attachment in attachments_for_send:
             message.add_attachment(
-                attachment_bytes,
-                maintype="application",
-                subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                filename=attachment_name,
+                attachment["bytes"],
+                maintype=attachment["maintype"],
+                subtype=attachment["subtype"],
+                filename=attachment["name"],
             )
         smtp_server.send_message(message)
 
@@ -609,6 +772,8 @@ def build_records(workflow_id, email_bytes, data_bytes):
             "row_count": 0,
             "slice_rows": [],
             "can_send": False,
+            "extra_pdf_name": "",
+            "extra_pdf_bytes": b"",
         }
 
         if not doctor or doctor.lower() == "nan":
@@ -627,6 +792,14 @@ def build_records(workflow_id, email_bytes, data_bytes):
             continue
 
         formatted_filtered_df = format_date_columns_in_df(filtered_df)
+        if doctor.strip().upper() == "FREDPEDO":
+            formatted_filtered_df = transform_fredpedo_slice_df(formatted_filtered_df)
+            formatted_filtered_df = format_date_columns_in_df(formatted_filtered_df)
+        elif workflow_id in EV_RSTC_WORKFLOWS:
+            formatted_filtered_df = drop_columns_by_normalized_name(
+                formatted_filtered_df,
+                EV_EXCLUDED_OUTPUT_COLUMNS,
+            )
         clean_name = safe_file_name(doctor.replace(".", "").replace("&", "and")) or "Report"
 
         if workflow_id in EV_RSTC_WORKFLOWS and ev_appointment_col and ev_appointment_col in formatted_filtered_df.columns:
@@ -654,6 +827,11 @@ def build_records(workflow_id, email_bytes, data_bytes):
     if workflow_uses_no_info_body_mode(workflow_id):
         unmatched_data_df = filter_no_info_rows(unmatched_data_df, no_info_columns)
     unmatched_data_df = format_date_columns_in_df(unmatched_data_df)
+    if workflow_id in EV_RSTC_WORKFLOWS:
+        unmatched_data_df = drop_columns_by_normalized_name(
+            unmatched_data_df,
+            EV_EXCLUDED_OUTPUT_COLUMNS,
+        )
     unmatched_rows = unmatched_data_df.fillna("").to_dict(orient="records")
     if unmatched_rows:
         records.append(
@@ -797,6 +975,41 @@ def send_all(workflow_id):
         flash("Send All completed.", "success")
     except Exception as e:
         flash(f"Send All failed: {e}", "error")
+    return redirect(url_for("home", workflow=workflow_id))
+
+
+@app.post("/upload-extra-pdf/<workflow_id>/<record_id>")
+def upload_extra_pdf(workflow_id, record_id):
+    workflow_id = get_workflow_or_default(workflow_id)
+    state = STATE_BY_WORKFLOW[workflow_id]
+    record = next((r for r in state["records"] if r["id"] == record_id), None)
+    if not record:
+        flash("Record not found.", "error")
+        return redirect(url_for("home", workflow=workflow_id))
+
+    if not should_attach_extra_pdf(workflow_id, record.get("office_name", "")):
+        flash("Extra PDF upload is not enabled for this record.", "error")
+        return redirect(url_for("home", workflow=workflow_id))
+
+    pdf_upload = request.files.get("extra_pdf_file")
+    if not pdf_upload or not pdf_upload.filename:
+        flash("Please choose a PDF file to upload.", "error")
+        return redirect(url_for("home", workflow=workflow_id))
+
+    filename = pdf_upload.filename.strip()
+    if not filename.lower().endswith(".pdf"):
+        flash("Only PDF files are allowed.", "error")
+        return redirect(url_for("home", workflow=workflow_id))
+
+    file_bytes = pdf_upload.read()
+    if not file_bytes:
+        flash("Uploaded PDF is empty.", "error")
+        return redirect(url_for("home", workflow=workflow_id))
+
+    safe_name = safe_file_name(filename.rsplit(".", 1)[0]) or "attachment"
+    record["extra_pdf_name"] = f"{safe_name}.pdf"
+    record["extra_pdf_bytes"] = file_bytes
+    flash(f"PDF attached for {record['office_name']}.", "success")
     return redirect(url_for("home", workflow=workflow_id))
 
 

@@ -256,10 +256,19 @@
                         <td>
                           <div class="row">
                             <button class="btn-outline view-btn" type="button" data-id="{{ r.id }}" {% if not r.slice_rows %}disabled{% endif %}>View</button>
+                            {% if current_workflow in ['ev-ortho-rstc', 'ev-dental-rstc'] and r.office_name|upper in ['FREDPEDO', 'MUSGROVE', 'REISTERS'] %}
+                              <form action="{{ url_for('upload_extra_pdf', workflow_id=current_workflow, record_id=r.id) }}" method="post" enctype="multipart/form-data" class="row" style="gap: 6px;">
+                                <input type="file" name="extra_pdf_file" accept=".pdf,application/pdf" required style="max-width: 170px;" />
+                                <button class="btn-outline" type="submit">Upload PDF</button>
+                              </form>
+                            {% endif %}
                             <form action="{{ url_for('send_one', workflow_id=current_workflow, record_id=r.id) }}" method="post">
                               <button class="btn-secondary" type="submit" {% if not r.can_send %}disabled{% endif %}>Send</button>
                             </form>
                           </div>
+                          {% if r.extra_pdf_name %}
+                            <div class="small" style="margin-top: 6px;">PDF: {{ r.extra_pdf_name }}</div>
+                          {% endif %}
                         </td>
                       </tr>
                     {% endfor %}
