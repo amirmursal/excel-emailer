@@ -52,11 +52,11 @@ RSTC_HIGHLIGHT_WORKFLOWS = {
 }
 EV_PDF_UPLOAD_OFFICE_NAMES = {"FREDPEDO", "MUSGROVE", "REISTERS"}
 EV_EXCLUDED_OUTPUT_COLUMNS = {
-    "officename",
     "patientsname",
     "patientidchart",
     "status",
 }
+MISC_OFFICE_COLUMN_WORKFLOWS = NO_INFO_WORKFLOWS | EV_RSTC_WORKFLOWS
 STATE_BY_WORKFLOW = {
     workflow_id: {
         "records": [],
@@ -253,6 +253,14 @@ def drop_columns_by_normalized_name(df, normalized_names_to_drop):
         if normalize_column_name(column_name) not in normalized_names_to_drop
     ]
     return df[keep_columns].copy()
+
+
+def ensure_office_name_first_column(df, office_name_value):
+    updated_df = df.copy()
+    if "Office Name" in updated_df.columns:
+        updated_df = updated_df.drop(columns=["Office Name"])
+    updated_df.insert(0, "Office Name", office_name_value)
+    return updated_df
 
 
 def dataframe_rows_to_text(rows):
@@ -506,14 +514,14 @@ def create_named_attachment_tempfile(attachment_name, attachment_bytes):
 
 def send_email(record, workflow_id, use_outlook_windows, use_outlook_mac, outlook, smtp_server, smtp_from):
     office_name_upper = str(record.get("office_name", "")).strip().upper()
-    if office_name_upper == "FREDPEDO":
+    if workflow_id in EV_RSTC_WORKFLOWS and office_name_upper == "FREDPEDO":
         appointment_for_subject = format_date_for_display(record.get("appointment_date", ""))
         if appointment_for_subject:
             appointment_for_subject = appointment_for_subject.replace("/", ".")
         else:
             appointment_for_subject = datetime.now().strftime("%m.%d.%Y")
         subject = f"FREDPEDO DENTAL ELIGIBILITY REPORT FOR DOS {appointment_for_subject}"
-    elif office_name_upper == "MUSGROVE":
+    elif workflow_id in EV_RSTC_WORKFLOWS and office_name_upper == "MUSGROVE":
         appointment_for_subject = format_date_for_display(record.get("appointment_date", ""))
         if appointment_for_subject:
             appointment_for_subject = appointment_for_subject.replace("/", "")
@@ -569,7 +577,7 @@ Mushtaq Memon
         attachment_bytes = to_excel_bytes(record["slice_rows"], workflow_id)
         office_name_for_file = safe_file_name(record["office_name"]) or record.get("safe_name") or "Report"
         office_name_upper = str(record.get("office_name", "")).strip().upper()
-        if office_name_upper == "FREDPEDO":
+        if workflow_id in EV_RSTC_WORKFLOWS and office_name_upper == "FREDPEDO":
             appointment_for_name = format_date_for_display(record.get("appointment_date", ""))
             if appointment_for_name:
                 appointment_for_name = appointment_for_name.replace("/", ".")
@@ -578,7 +586,7 @@ Mushtaq Memon
             attachment_name = (
                 f"FREDPEDO DENTAL ELIGIBILITY REPORT FOR DOS {appointment_for_name}.xlsx"
             )
-        elif office_name_upper == "MUSGROVE":
+        elif workflow_id in EV_RSTC_WORKFLOWS and office_name_upper == "MUSGROVE":
             appointment_for_name = format_date_for_display(record.get("appointment_date", ""))
             if appointment_for_name:
                 appointment_for_name = appointment_for_name.replace("/", "")
@@ -792,14 +800,18 @@ def build_records(workflow_id, email_bytes, data_bytes):
             continue
 
         formatted_filtered_df = format_date_columns_in_df(filtered_df)
-        if doctor.strip().upper() == "FREDPEDO":
+        if workflow_id in EV_RSTC_WORKFLOWS and doctor.strip().upper() == "FREDPEDO":
             formatted_filtered_df = transform_fredpedo_slice_df(formatted_filtered_df)
             formatted_filtered_df = format_date_columns_in_df(formatted_filtered_df)
+            formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
         elif workflow_id in EV_RSTC_WORKFLOWS:
             formatted_filtered_df = drop_columns_by_normalized_name(
                 formatted_filtered_df,
                 EV_EXCLUDED_OUTPUT_COLUMNS,
             )
+            formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
+        elif workflow_id in NO_INFO_WORKFLOWS:
+            formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
         clean_name = safe_file_name(doctor.replace(".", "").replace("&", "and")) or "Report"
 
         if workflow_id in EV_RSTC_WORKFLOWS and ev_appointment_col and ev_appointment_col in formatted_filtered_df.columns:
@@ -832,6 +844,11 @@ def build_records(workflow_id, email_bytes, data_bytes):
             unmatched_data_df,
             EV_EXCLUDED_OUTPUT_COLUMNS,
         )
+    if workflow_id in MISC_OFFICE_COLUMN_WORKFLOWS and not unmatched_data_df.empty:
+        unmatched_office_names = office_names.loc[unmatched_data_df.index].fillna("").astype(str)
+        if "Office Name" in unmatched_data_df.columns:
+            unmatched_data_df = unmatched_data_df.drop(columns=["Office Name"])
+        unmatched_data_df.insert(0, "Office Name", unmatched_office_names.values)
     unmatched_rows = unmatched_data_df.fillna("").to_dict(orient="records")
     if unmatched_rows:
         records.append(
