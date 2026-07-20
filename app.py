@@ -52,7 +52,6 @@ RSTC_HIGHLIGHT_WORKFLOWS = {
 }
 EV_PDF_UPLOAD_OFFICE_NAMES = {"FREDPEDO", "MUSGROVE", "REISTERS"}
 EV_EXCLUDED_OUTPUT_COLUMNS = {
-    "patientsname",
     "patientidchart",
     "status",
 }
@@ -422,7 +421,46 @@ def get_smtp_server():
     return smtp_server, smtp_from
 
 
-def to_excel_bytes(rows, workflow_id):
+def compute_highlight_styles(df, workflow_id, office_name=""):
+    if df is None or df.empty:
+        return []
+    normalized_cols = [normalize_column_name(col) for col in df.columns]
+    status_col_indexes = [
+        idx
+        for idx, normalized_name in enumerate(normalized_cols)
+        if normalized_name in {"status", "statuscode"}
+    ]
+    if not status_col_indexes:
+        return ["none"] * len(df)
+
+    status_col_idx = None
+    for idx, normalized_name in enumerate(normalized_cols):
+        if normalized_name == "status":
+            status_col_idx = idx
+            break
+
+    styles = []
+    is_ev_reisters = workflow_id in EV_RSTC_WORKFLOWS and str(office_name).strip().upper() == "REISTERS"
+    for row_values in df.itertuples(index=False):
+        if is_ev_reisters and status_col_idx is not None:
+            status_value = row_values[status_col_idx]
+            status_text = "" if pd.isna(status_value) else str(status_value).strip().lower()
+            if status_text == "term":
+                styles.append("pink")
+                continue
+
+        style = "none"
+        for col_idx in status_col_indexes:
+            value = row_values[col_idx]
+            text_value = "" if pd.isna(value) else str(value).strip().upper()
+            if text_value not in {"BV", "EV"}:
+                style = "yellow"
+                break
+        styles.append(style)
+    return styles
+
+
+def to_excel_bytes(rows, workflow_id, highlight_styles=None):
     output = BytesIO()
     df = pd.DataFrame(rows)
     with pd.ExcelWriter(output, engine="openpyxl") as writer:
@@ -466,29 +504,24 @@ def to_excel_bytes(rows, workflow_id):
                 header_cell.font = Font(bold=True)
 
         if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS and not df.empty:
-            normalized_cols = [normalize_column_name(col) for col in df.columns]
-            status_col_indexes = [
-                idx
-                for idx, normalized_name in enumerate(normalized_cols)
-                if normalized_name in {"status", "statuscode"}
-            ]
-            if status_col_indexes:
-                yellow_fill = PatternFill(
-                    start_color="FFF59D",
-                    end_color="FFF59D",
-                    fill_type="solid",
-                )
-                for df_row_idx, row_values in enumerate(df.itertuples(index=False), start=2):
-                    should_highlight = False
-                    for col_idx in status_col_indexes:
-                        value = row_values[col_idx]
-                        text_value = "" if pd.isna(value) else str(value).strip().upper()
-                        if text_value not in {"BV", "EV"}:
-                            should_highlight = True
-                            break
-                    if should_highlight:
-                        for excel_col_idx in range(1, len(df.columns) + 1):
-                            worksheet.cell(row=df_row_idx, column=excel_col_idx).fill = yellow_fill
+            effective_styles = highlight_styles
+            if effective_styles is None:
+                effective_styles = compute_highlight_styles(df, workflow_id)
+            yellow_fill = PatternFill(
+                start_color="FFF59D",
+                end_color="FFF59D",
+                fill_type="solid",
+            )
+            pink_fill = PatternFill(
+                start_color="F8BBD0",
+                end_color="F8BBD0",
+                fill_type="solid",
+            )
+            for row_offset, style in enumerate(effective_styles, start=2):
+                if style in {"yellow", "pink"}:
+                    row_fill = pink_fill if style == "pink" else yellow_fill
+                    for excel_col_idx in range(1, len(df.columns) + 1):
+                        worksheet.cell(row=row_offset, column=excel_col_idx).fill = row_fill
     return output.getvalue()
 
 
@@ -516,17 +549,11 @@ def send_email(record, workflow_id, use_outlook_windows, use_outlook_mac, outloo
     office_name_upper = str(record.get("office_name", "")).strip().upper()
     if workflow_id in EV_RSTC_WORKFLOWS and office_name_upper == "FREDPEDO":
         appointment_for_subject = format_date_for_display(record.get("appointment_date", ""))
-        if appointment_for_subject:
-            appointment_for_subject = appointment_for_subject.replace("/", ".")
-        else:
-            appointment_for_subject = datetime.now().strftime("%m.%d.%Y")
+        appointment_for_subject = appointment_for_subject.replace("/", ".")
         subject = f"FREDPEDO DENTAL ELIGIBILITY REPORT FOR DOS {appointment_for_subject}"
     elif workflow_id in EV_RSTC_WORKFLOWS and office_name_upper == "MUSGROVE":
         appointment_for_subject = format_date_for_display(record.get("appointment_date", ""))
-        if appointment_for_subject:
-            appointment_for_subject = appointment_for_subject.replace("/", "")
-        else:
-            appointment_for_subject = datetime.now().strftime("%m%d%Y")
+        appointment_for_subject = appointment_for_subject.replace("/", "")
         subject = (
             f"MUSGROVE DENTAL ELIGIBLITY AND HISTORIES REPORT FOR DOS {appointment_for_subject}"
         )
@@ -566,32 +593,31 @@ Mushtaq Memon
         attachment_bytes = None
         attachment_name = None
     else:
+        report_label = "EV Report" if workflow_id in EV_RSTC_WORKFLOWS else "BV Report"
         body = f"""Hi,
 
-Please find attached BV Report for {record['office_name']}.
+Please find attached {report_label} for {record['office_name']}.
 
 Regards,
 Mushtaq Memon
 """
         body_html = None
-        attachment_bytes = to_excel_bytes(record["slice_rows"], workflow_id)
+        attachment_bytes = to_excel_bytes(
+            record["slice_rows"],
+            workflow_id,
+            highlight_styles=record.get("highlight_styles"),
+        )
         office_name_for_file = safe_file_name(record["office_name"]) or record.get("safe_name") or "Report"
         office_name_upper = str(record.get("office_name", "")).strip().upper()
         if workflow_id in EV_RSTC_WORKFLOWS and office_name_upper == "FREDPEDO":
             appointment_for_name = format_date_for_display(record.get("appointment_date", ""))
-            if appointment_for_name:
-                appointment_for_name = appointment_for_name.replace("/", ".")
-            else:
-                appointment_for_name = datetime.now().strftime("%m.%d.%Y")
+            appointment_for_name = appointment_for_name.replace("/", ".")
             attachment_name = (
                 f"FREDPEDO DENTAL ELIGIBILITY REPORT FOR DOS {appointment_for_name}.xlsx"
             )
         elif workflow_id in EV_RSTC_WORKFLOWS and office_name_upper == "MUSGROVE":
             appointment_for_name = format_date_for_display(record.get("appointment_date", ""))
-            if appointment_for_name:
-                appointment_for_name = appointment_for_name.replace("/", "")
-            else:
-                appointment_for_name = datetime.now().strftime("%m%d%Y")
+            appointment_for_name = appointment_for_name.replace("/", "")
             attachment_name = (
                 f"MUSGROVE DENTAL ELIGIBLITY AND HISTORIES REPORT FOR DOS {appointment_for_name}.xlsx"
             )
@@ -599,7 +625,14 @@ Mushtaq Memon
             us_date_for_file = (datetime.now() - timedelta(days=1)).strftime("%m-%d-%Y")
             attachment_name = f"{office_name_for_file} {us_date_for_file}.xlsx"
         else:
-            us_date_for_file = datetime.now().strftime("%m-%d-%Y")
+            if workflow_id in EV_RSTC_WORKFLOWS:
+                appointment_for_name = format_date_for_display(record.get("appointment_date", ""))
+                if appointment_for_name:
+                    us_date_for_file = appointment_for_name.replace("/", "-")
+                else:
+                    us_date_for_file = datetime.now().strftime("%m-%d-%Y")
+            else:
+                us_date_for_file = datetime.now().strftime("%m-%d-%Y")
             attachment_name = f"{office_name_for_file} {us_date_for_file}.xlsx"
 
     attachments_for_send = []
@@ -780,6 +813,7 @@ def build_records(workflow_id, email_bytes, data_bytes):
             "row_count": 0,
             "slice_rows": [],
             "can_send": False,
+            "highlight_styles": [],
             "extra_pdf_name": "",
             "extra_pdf_bytes": b"",
         }
@@ -800,24 +834,26 @@ def build_records(workflow_id, email_bytes, data_bytes):
             continue
 
         formatted_filtered_df = format_date_columns_in_df(filtered_df)
-        if workflow_id in EV_RSTC_WORKFLOWS and doctor.strip().upper() == "FREDPEDO":
-            formatted_filtered_df = transform_fredpedo_slice_df(formatted_filtered_df)
-            formatted_filtered_df = format_date_columns_in_df(formatted_filtered_df)
-            formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
-        elif workflow_id in EV_RSTC_WORKFLOWS:
-            formatted_filtered_df = drop_columns_by_normalized_name(
-                formatted_filtered_df,
-                EV_EXCLUDED_OUTPUT_COLUMNS,
-            )
-            formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
-        elif workflow_id in NO_INFO_WORKFLOWS:
-            formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
         clean_name = safe_file_name(doctor.replace(".", "").replace("&", "and")) or "Report"
 
         if workflow_id in EV_RSTC_WORKFLOWS and ev_appointment_col and ev_appointment_col in formatted_filtered_df.columns:
             grouped = formatted_filtered_df.groupby(ev_appointment_col, dropna=False, sort=False)
             for appointment_value, appointment_df in grouped:
                 appointment_date = format_date_for_display(appointment_value)
+                appointment_highlight_styles = compute_highlight_styles(
+                    appointment_df, workflow_id, doctor
+                )
+                prepared_df = appointment_df.copy()
+                if doctor.strip().upper() == "FREDPEDO":
+                    prepared_df = transform_fredpedo_slice_df(prepared_df)
+                    prepared_df = format_date_columns_in_df(prepared_df)
+                    prepared_df = ensure_office_name_first_column(prepared_df, doctor)
+                else:
+                    prepared_df = drop_columns_by_normalized_name(
+                        prepared_df,
+                        EV_EXCLUDED_OUTPUT_COLUMNS,
+                    )
+                    prepared_df = ensure_office_name_first_column(prepared_df, doctor)
                 grouped_record = record.copy()
                 grouped_record["id"] = str(uuid.uuid4())
                 grouped_record["can_send"] = True
@@ -825,20 +861,44 @@ def build_records(workflow_id, email_bytes, data_bytes):
                 grouped_record["safe_name"] = (
                     safe_file_name(f"{clean_name} {appointment_date}") or clean_name
                 )
-                grouped_record["row_count"] = len(appointment_df)
-                grouped_record["slice_rows"] = appointment_df.fillna("").to_dict(orient="records")
+                grouped_record["row_count"] = len(prepared_df)
+                grouped_record["slice_rows"] = prepared_df.fillna("").to_dict(orient="records")
+                grouped_record["highlight_styles"] = appointment_highlight_styles
                 records.append(grouped_record)
         else:
+            record_highlight_styles = (
+                compute_highlight_styles(formatted_filtered_df, workflow_id, doctor)
+                if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS
+                else []
+            )
+            if workflow_id in EV_RSTC_WORKFLOWS and doctor.strip().upper() == "FREDPEDO":
+                formatted_filtered_df = transform_fredpedo_slice_df(formatted_filtered_df)
+                formatted_filtered_df = format_date_columns_in_df(formatted_filtered_df)
+                formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
+            elif workflow_id in EV_RSTC_WORKFLOWS:
+                formatted_filtered_df = drop_columns_by_normalized_name(
+                    formatted_filtered_df,
+                    EV_EXCLUDED_OUTPUT_COLUMNS,
+                )
+                formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
+            elif workflow_id in NO_INFO_WORKFLOWS:
+                formatted_filtered_df = ensure_office_name_first_column(formatted_filtered_df, doctor)
             record["can_send"] = True
             record["safe_name"] = clean_name
             record["row_count"] = len(formatted_filtered_df)
             record["slice_rows"] = formatted_filtered_df.fillna("").to_dict(orient="records")
+            record["highlight_styles"] = record_highlight_styles
             records.append(record)
 
     unmatched_data_df = data_df[(~office_names.isin(doctor_name_set)) & (office_names != "")]
     if workflow_uses_no_info_body_mode(workflow_id):
         unmatched_data_df = filter_no_info_rows(unmatched_data_df, no_info_columns)
     unmatched_data_df = format_date_columns_in_df(unmatched_data_df)
+    unmatched_highlight_styles = (
+        compute_highlight_styles(unmatched_data_df, workflow_id, "Miscellaneous (Non Matching)")
+        if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS
+        else []
+    )
     if workflow_id in EV_RSTC_WORKFLOWS:
         unmatched_data_df = drop_columns_by_normalized_name(
             unmatched_data_df,
@@ -862,6 +922,7 @@ def build_records(workflow_id, email_bytes, data_bytes):
                 "message": "All non-matching records grouped here.",
                 "row_count": len(unmatched_rows),
                 "slice_rows": unmatched_rows,
+                "highlight_styles": unmatched_highlight_styles,
                 "can_send": True,
             }
         )
@@ -1076,36 +1137,26 @@ def preview_slice(workflow_id, record_id):
     try:
         df = pd.DataFrame(record["slice_rows"])
         rows = sanitize_rows_for_json(df.head(200).to_dict(orient="records"))
-        highlight_flags = []
-        if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS and not df.empty:
-            normalized_cols = [normalize_column_name(col) for col in df.columns]
-            status_col_indexes = [
-                idx
-                for idx, normalized_name in enumerate(normalized_cols)
-                if normalized_name in {"status", "statuscode"}
-            ]
-            if status_col_indexes:
-                preview_df = df.head(200)
-                for row_values in preview_df.itertuples(index=False):
-                    should_highlight = False
-                    for col_idx in status_col_indexes:
-                        value = row_values[col_idx]
-                        text_value = "" if pd.isna(value) else str(value).strip().upper()
-                        if text_value not in {"BV", "EV"}:
-                            should_highlight = True
-                            break
-                    highlight_flags.append(should_highlight)
-            else:
-                highlight_flags = [False] * len(rows)
+        record_styles = record.get("highlight_styles") or []
+        if record_styles:
+            highlight_styles = list(record_styles[: len(rows)])
+            if len(highlight_styles) < len(rows):
+                highlight_styles.extend(["none"] * (len(rows) - len(highlight_styles)))
         else:
-            highlight_flags = [False] * len(rows)
+            highlight_styles = (
+                compute_highlight_styles(
+                    df.head(200), workflow_id, record.get("office_name", "")
+                )
+                if workflow_id in RSTC_HIGHLIGHT_WORKFLOWS
+                else ["none"] * len(rows)
+            )
         return jsonify(
             {
                 "ok": True,
                 "office_name": record["office_name"],
                 "columns": list(df.columns),
                 "rows": rows,
-                "highlight_flags": highlight_flags,
+                "highlight_styles": highlight_styles,
             }
         )
     except Exception as e:

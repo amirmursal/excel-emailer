@@ -335,14 +335,16 @@
         modalTitle.textContent = `Slice Preview - ${payload.office_name}`;
         const columns = payload.columns || [];
         const rows = payload.rows || [];
-        const highlightFlags = payload.highlight_flags || [];
+        const highlightStyles = payload.highlight_styles || [];
 
         let html = "<thead><tr>";
         for (const c of columns) html += `<th>${c}</th>`;
         html += "</tr></thead><tbody>";
 
         rows.forEach((row, rowIndex) => {
-          const rowStyle = highlightFlags[rowIndex] ? ' style="background:#fff59d;"' : "";
+          let rowStyle = "";
+          if (highlightStyles[rowIndex] === "yellow") rowStyle = ' style="background:#fff59d;"';
+          if (highlightStyles[rowIndex] === "pink") rowStyle = ' style="background:#f8bbd0;"';
           html += `<tr${rowStyle}>`;
           for (const c of columns) {
             const value = row[c] == null ? "" : String(row[c]);
